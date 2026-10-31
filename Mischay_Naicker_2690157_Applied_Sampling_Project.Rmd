@@ -1,0 +1,487 @@
+---
+title: "Estimating the Mean Motor Insurance Claim: Stratified Sampling with Neyman Allocation"
+subtitle: "STAT4102A Applied Sampling, Mini Project, Semester Two 2026"
+author: "Mischay Naicker 2690157"
+date: "31 October 2026"
+output:
+  pdf_document:
+    number_sections: false
+    toc: false
+fontsize: 11pt
+geometry: margin=2.2cm
+header-includes:
+  - \usepackage{float}
+  - \usepackage{booktabs}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.pos = "H",
+                      fig.width = 6.4, fig.height = 3.3, out.width = "88%")
+library(survey)
+library(ggplot2)
+fmt <- function(x, d = 0) formatC(x, format = "f", digits = d, big.mark = ",")
+tab <- function(df, cap, ...) knitr::kable(df, booktabs = TRUE, caption = cap,
+                                           escape = FALSE, linesep = "", row.names = FALSE, ...)
+```
+
+# Introduction
+
+This project designs, draws and evaluates a probability sample from a finite population of 10,000 motor insurance claims. The primary design is **stratified random sampling with Neyman allocation**, and SRSWOR is the benchmark. The report follows the following: Section A plans the survey, Section B determines the sample size, Section C builds the population and draws the sample, Section D does design-based estimation and Section E repeats everything 1,000 times to assess bias, precision and coverage.
+
+# Notation
+
+| Symbol | Meaning |
+|---|---|
+| $N$, $n$ | Population size (10,000 claims) and total sample size |
+| $h=1,\dots,4$ | Stratum index (pothole/road, weather/hail, accident, theft) |
+| $N_h$, $n_h$ | Population size and sample size of stratum $h$ |
+| $W_h=N_h/N$ | Stratum weight (share of the population in stratum $h$) |
+| $f_h=n_h/N_h$ | Sampling fraction in stratum $h$ |
+| $\pi_h=n_h/N_h$ | Inclusion probability of a claim in stratum $h$ |
+| $w_h=1/\pi_h=N_h/n_h$ | Sampling weight (population claims represented by one sampled claim) |
+| $y_{hj}$ | Claim amount of unit $j$ in stratum $h$ (rand) |
+| $\bar Y$, $\bar Y_h$ | True population mean and true mean of stratum $h$ |
+| $\bar Y_0$ | Baseline (planning) value of the mean, from the lognormal moments |
+| $\bar y_h$, $\bar y_{st}$ | Sample mean of stratum $h$ and the stratified estimator $\sum_h W_h\bar y_h$ |
+| $\mu_h$, $\sigma_h$ | Lognormal parameters of stratum $h$ (log scale) |
+| $S_h$, $s_h$ | Prior (population) and sample standard deviation of claims in stratum $h$ |
+| $d$ | Margin of error (half-width of the 95% confidence interval) |
+| $z_{0.975}$ | Normal critical value for 95% confidence (1.96) |
+| $V$ | Target variance of $\bar y_{st}$, $V=(d/z_{0.975})^2$ |
+| $V_{opt}$, $V_{prop}$, $V_{SRS}$ | Variance of the mean under Neyman allocation, proportional allocation and SRSWOR |
+| $\hat V(\bar y_{st})$, SE, CV | Estimated variance, standard error and coefficient of variation of the estimate |
+| deff | Design effect: variance of the design divided by the variance under SRSWOR |
+| $r$ | Anticipated non-response rate (10%) |
+| $e$ | Margin of error as a share of the assumed mean (used in the sensitivity analysis) |
+| $R$ | Number of Monte Carlo repetitions (1,000) |
+
+Table: Notation used in this project
+
+# Section A: Survey Planning
+
+**A1. Objective and research questions.** The objective is to estimate the average claim amount for one motor insurer's portfolio. The research questions are: (i) what is the mean claim amount, and (ii) does stratified sampling with Neyman allocation estimate it more precisely than SRSWOR of the same size?
+
+**A2. Primary parameter.** The parameter is the finite-population mean claim,
+$$\bar{Y}=\frac{1}{N}\sum_{h=1}^{4}\sum_{j=1}^{N_h}y_{hj}=\sum_{h=1}^{4}W_h\bar{Y}_h,\qquad W_h=\frac{N_h}{N},\ N=10{,}000 .$$
+An accurate mean claim amount allows insurers to price premiums that are profitable yet competitive and to set adequate reserves that guard against insolvency. For policyholders, it supports fair premiums and helps prevent underinsurance, so claims are paid in full. Since auditing every claim file is costly, a well-designed sample is a practical way to estimate it.
+
+**A3. Target population.** One insurer's motor own-damage claims lodged in Gauteng in the 2026 claim year. Claims differ in cause of loss, which defines four strata, and claimants differ in age, vehicle age, vehicle value and area (urban or rural). Table 1 gives the stratum structure. 
+
+**A4. Terminology.**
+
+| Concept | In this project |
+|---|---|
+| Target population | All motor own-damage claims lodged with the insurer in Gauteng in 2026 |
+| Sampled population | The $N=10{,}000$ settled claims on the register at the extraction date (open claims are not yet on it) |
+| Sampling unit | A single claim |
+| Observation unit | A single claim (amount and covariates are read from its file) |
+| Sampling frame | The claims register: claim ID, cause of loss and amount, listed by cause |
+
+Table: Key survey terms for the claims study.
+
+```{r plan}
+strata <- c("Pothole/road", "Weather/hail", "Accident", "Theft")
+N_h <- c(3000, 2500, 3500, 1000)
+N   <- sum(N_h)
+W_h <- N_h / N
+mu  <- c(8, 9, 10, 10.8)
+sig <- c(0.5, 0.85, 0.9, 1.2)
+# Prior information: lognormal moments (planning values of mean and S_h)
+mean_prior <- exp(mu + sig^2 / 2)
+S_prior    <- mean_prior * sqrt(exp(sig^2) - 1)
+Ybar0      <- sum(W_h * mean_prior)             # baseline parameter value
+S2_prior   <- sum(W_h * (S_prior^2 + (mean_prior - Ybar0)^2))  # overall variance (SRS planning)
+z <- qnorm(0.975)
+```
+
+**A5. Simulated population.** Claim amounts are positive and right-skewed with a few very large values, so each stratum is lognormal, $Y_{hj}\sim\text{LN}(\mu_h,\sigma_h^2)$, with mean $e^{\mu_h+\sigma_h^2/2}$ and standard deviation $e^{\mu_h+\sigma_h^2/2}\times\sqrt{e^{\sigma_h^2}-1}$. Strata differ realistically: potholes give frequent, low-severity claims (tyres, rims); weather and hail give panel damage; accidents give repairs of varied severity; theft is usually a total loss with the heaviest tail. The prior stratum standard deviations $S_h$ (assumed known from earlier portfolios, as the brief allows) come from these moments. The random seed is **4102**.
+
+```{r popgen}
+set.seed(4102)
+pop <- do.call(rbind, lapply(seq_along(strata), function(h) {
+  y <- rlnorm(N_h[h], mu[h], sig[h])
+  z_h <- (log(y) - mu[h]) / sig[h]                 # standardised severity
+  age <- pmin(pmax(round(rnorm(N_h[h], c(40, 46, 36, 38)[h], 11)), 18), 80)
+  veh_age <- rpois(N_h[h], c(8, 6, 7, 9)[h])
+  veh_val <- exp(c(11.2, 11.8, 12.0, 12.3)[h] + 0.3 * z_h +
+                 rnorm(N_h[h], 0, 0.35) - 0.04 * veh_age)
+  area <- ifelse(rbinom(N_h[h], 1, c(0.60, 0.70, 0.80, 0.85)[h]) == 1, "Urban", "Rural")
+  data.frame(stratum = strata[h], claim_amount = round(y, 2),
+             claimant_age = age, vehicle_age = veh_age,
+             vehicle_value = round(veh_val), area = area)
+}))
+pop <- pop[sample(N), ]                             # register is not sorted by cause
+pop$claim_id <- sprintf("C%05d", seq_len(N))
+pop$stratum  <- factor(pop$stratum, levels = strata)
+pop <- pop[, c("claim_id", "stratum", "claim_amount", "claimant_age",
+               "vehicle_age", "vehicle_value", "area")]
+rownames(pop) <- NULL
+
+Ybar  <- mean(pop$claim_amount)                     # TRUE finite-population mean
+S_h   <- tapply(pop$claim_amount, pop$stratum, sd)  # realised stratum SDs
+S2    <- var(pop$claim_amount)
+```
+
+The **true finite-population mean** computed from the 10,000 simulated claims is $\bar{Y}=$ R`r fmt(Ybar, 2)`; the planning baseline from the lognormal moments is $\bar{Y}_0=$ R`r fmt(Ybar0, 2)`. The table below summarises the population.
+
+```{r poptab}
+d <- data.frame(
+  Stratum = strata, Nh = fmt(N_h), Wh = fmt(W_h, 2),
+  mu = mu, sigma = sig,
+  Mean = fmt(tapply(pop$claim_amount, pop$stratum, mean)),
+  Sh = fmt(S_prior), Max = fmt(tapply(pop$claim_amount, pop$stratum, max)),
+  Age = fmt(tapply(pop$claimant_age, pop$stratum, mean), 1),
+  Urban = fmt(100 * tapply(pop$area == "Urban", pop$stratum, mean), 0))
+tab(d, "Population structure by claim type: lognormal parameters, realised mean claim, prior $S_h$, largest claim, mean claimant age, and the percentage of claims in each stratum that come from urban areas.",
+    col.names = c("Stratum", "$N_h$", "$W_h$", "$\\mu_h$", "$\\sigma_h$",
+                  "Mean (R)", "Prior $S_h$ (R)", "Max (R)", "Mean age",
+                  "Urban claims (\\% of stratum)"),
+    align = "lrrrrrrrrr")
+```
+
+**A6. Design choice.** Stratified random sampling with **Neyman allocation**, justified by:
+
+- *Population structure:* strata (cause of loss) are internally homogeneous and differ strongly from each other, which is  where stratification pays off.
+- *Precision/efficiency:* the prior $S_h$ range from about R1,800 (potholes) to R180,000 (theft). Neyman puts sample where the variance is, giving $V_{opt}\le V_{prop}\le V_{SRS}$.
+- *Operational convenience:* cause of loss is already recorded on every claim, so the frame is pre-stratified at no extra cost.
+- *Cost:* the same precision needs fewer claim files than SRSWOR. Neyman assumes equal cost per file, which is reasonable for an electronic register but is a limitation. Proportional allocation was rejected because it would give theft only 10% of the sample despite it dominating the variance.
+
+**A7. Selection and data collection.** (1) Divide the claims register into the four strata using the recorded cause of loss. (2) Calculate the number of claims to select from each stratum, $n_h=nN_hS_h/\sum N_hS_h$, using the prior standard deviations $S_h$, with a minimum of 30 claims per stratum. (3) Select a simple random sample without replacement of $n_h$ claims independently within each stratum, using a fixed random seed so that the draw can be reproduced. (4) In a real survey, the record of each selected claim would be retrieved and the claim amount and auxiliary variables captured; here the data are simulated, so no questionnaire or data-collection instrument was used and the values are read directly from the simulated register. (5) In practice, missing records would be followed up, and the number of claims drawn is increased in advance to allow for expected non-response (Section B).
+
+**A8. Non-sampling errors.** (i) *Processing error:* keying or capture mistakes when claims were recorded. (ii) *Misclassification:* a theft logged as an accident puts a claim in the wrong stratum, which breaks within-stratum homogeneity and gives it the wrong weight. (iii) *Non-response:* missing, incomplete or disputed claim files. (iv) *Measurement error:* an initial estimate recorded instead of the final settled amount.
+
+# Section B: Sample-Size Determination
+
+**B1. Formula.** Setting the Neyman variance equal to the target variance $V$,
+$$V_{opt}(\bar y_{st})=\frac{1}{n}\Big(\sum_h W_hS_h\Big)^2-\frac{1}{N}\sum_h W_hS_h^2=V
+\;\Longrightarrow\;
+n=\frac{\big(\sum_h W_hS_h\big)^2}{V+\frac{1}{N}\sum_h W_hS_h^2},\qquad V=\Big(\frac{d}{z_{0.975}}\Big)^2 .$$
+Here $d$ is the margin of error (the half-width of the 95% confidence interval, so the interval is $\bar y_{st}\pm d$), $z_{0.975}=1.96$ is the normal critical value for 95% confidence, and $V$ is the largest variance of $\bar y_{st}$ we can accept to achieve that margin. Equivalently $n=n_0/(1+\sum W_hS_h^2/(NV))$ with $n_0=(\sum W_hS_h)^2/V$, so the second term in the denominator is the finite population correction. Allocation is $n_h=nN_hS_h/\sum N_hS_h$.
+
+**B2–B3. Confidence level and precision.** The level is 95% ($z=$ `r fmt(z, 3)`). The half-width must be at most 5% of the baseline: $d=0.05\,\bar{Y}_0=$ R`r fmt(0.05 * Ybar0, 2)`.
+
+**B4. Assumptions.**  The strata $S_h$ are the prior values in the population table of A5. Anticipated non-response is $r=10\%$, so the number of files drawn is $n/(1-r)$. A minimum of 30 claims per stratum keeps each $s_h^2$ stable, and no stratum may exceed $N_h$.
+
+```{r size}
+n_neyman <- function(d, S = S_prior) {
+  V <- (d / z)^2
+  sum(W_h * S)^2 / (V + sum(W_h * S^2) / N)
+}
+n_srs_fn <- function(d) { V <- (d / z)^2; S2_prior / (V + S2_prior / N) }
+
+alloc <- function(n, Nh, S, nmin = 30) {
+  ni <- numeric(length(Nh)); fixed <- rep(FALSE, length(Nh))
+  repeat {
+    free <- !fixed
+    ni[free] <- (n - sum(ni[fixed])) * Nh[free] * S[free] / sum(Nh[free] * S[free])
+    lo <- free & ni < nmin; hi <- free & ni > Nh
+    if (!any(lo | hi)) break
+    ni[lo] <- nmin; ni[hi] <- Nh[hi]; fixed <- fixed | lo | hi
+  }
+  r <- floor(ni); rem <- n - sum(r)
+  if (rem > 0) { fr <- ni - r; fr[fixed] <- -1
+                 idx <- order(fr, decreasing = TRUE)[seq_len(rem)]; r[idx] <- r[idx] + 1 }
+  r
+}
+
+d0      <- 0.05 * Ybar0
+n_raw   <- n_neyman(d0)
+n_calc  <- ceiling(n_raw)
+n_srs0  <- ceiling(n_srs_fn(d0))
+r_nr    <- 0.10
+n_final <- ceiling(n_calc / (1 - r_nr))
+n_h     <- alloc(n_final, N_h, S_prior)
+n_h_raw <- n_final * N_h * S_prior / sum(N_h * S_prior)
+f_h     <- n_h / N_h
+wt_h    <- N_h / n_h
+```
+
+**B5. Result.** The Neyman design needs $n=$ `r n_calc` claims for a half-width of R`r fmt(d0)`. Without stratification, SRSWOR would need `r n_srs0` (the stratified design needs about `r fmt(100 * (1 - n_calc / n_srs0))`% fewer claims). Allowing for 10% non-response gives **`r n_final` claims** to draw. The allocation table and Figure 1 show the result.
+
+```{r alloctab}
+d <- data.frame(Stratum = strata, Nh = fmt(N_h), Wh = fmt(W_h, 2), Sh = fmt(S_prior),
+                Raw = fmt(n_h_raw, 1), nh = fmt(n_h), fh = fmt(100 * f_h, 1),
+                wt = fmt(wt_h, 2))
+d <- rbind(d, data.frame(Stratum = "Total", Nh = fmt(N), Wh = "1.00", Sh = "",
+                         Raw = fmt(sum(n_h_raw), 1), nh = fmt(sum(n_h)), fh = "", wt = ""))
+tab(d, "Neyman allocation of the final sample (minimum 30 per stratum).",
+    col.names = c("Stratum", "$N_h$", "$W_h$", "$S_h$ (R)", "Raw Neyman", "$n_h$",
+                  "$f_h$ (\\%)", "Weight $N_h/n_h$"), align = "lrrrrrrr")
+```
+
+```{r figalloc, fig.height=2.9, fig.cap="Sample allocation: proportional versus Neyman (final, with minimum of 30)."}
+ad <- data.frame(Stratum = factor(rep(strata, 2), levels = strata),
+                 Method = rep(c("Proportional", "Neyman"), each = 4),
+                 n = c(n_final * W_h, n_h))
+ggplot(ad, aes(Stratum, n, fill = Method)) + geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = round(n)), position = position_dodge(0.7), vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("yellow", "springgreen2")) +
+  labs(x = NULL, y = "Sample size") + theme_minimal(base_size = 10)
+```
+
+Figure 1 compares proportional allocation, which copies the population shares, with Neyman allocation for the same total of `r n_final` claims. The comparison shows what Neyman allocation does and why it is preferred here: the most variable stratum receives the largest share of the sample. Theft is only 10% of claims but receives about `r fmt(100 * n_h[4] / n_final)`% of the sample (`r n_h[4]` claims, against `r fmt(n_final * W_h[4])` under proportional allocation), because its claims are by far the most variable and so contribute most of the uncertainty in the overall mean. Sampling them heavily is the most effective way to reduce the variance of the estimator. It also means we select `r fmt(100 * f_h[4])`% of all theft claims, so the finite population correction has a large effect in this stratum and cannot be ignored. Potholes are 30% of claims but receive only `r n_h[1]` claims (the raw Neyman value of `r fmt(n_h_raw[1], 1)` is raised to the minimum of 30), because their claims are small and similar, so extra pothole claims add very little precision. The sample is therefore concentrated where the variability is, not where the claims are most numerous.
+
+```{r sens}
+ks <- c(0.25, 0.50, 0.75, 1.00)
+lab <- paste0(100 * ks, "% of baseline")
+d_grid <- seq(150, 6000, length.out = 150)
+c1 <- data.frame(d = d_grid, n = sapply(d_grid, n_neyman))
+e_grid <- seq(0.01, 0.20, length.out = 120)
+c2 <- do.call(rbind, lapply(seq_along(ks), function(i)
+  data.frame(Assumed = factor(lab[i], levels = lab), e = e_grid,
+             n = sapply(e_grid, function(e) n_neyman(e * ks[i] * Ybar0)))))
+pts <- data.frame(Assumed = factor(lab, levels = lab), e = 0.05,
+                  n = sapply(ks, function(k) n_neyman(0.05 * k * Ybar0)))
+```
+
+**B6. Required sample size against margin of error.** Figure 2 plots $n$ against the absolute half-width $d$ for the baseline mean.
+
+```{r fig1, fig.cap="Required Neyman sample size against margin of error."}
+ggplot(c1, aes(d, n)) + geom_line(linewidth = 0.9, colour = "chartreuse1") +
+  geom_vline(xintercept = d0, linetype = 2) +
+  geom_hline(yintercept = n_calc, linetype = 2) +
+  annotate("point", x = d0, y = n_calc, size = 2.5) +
+  annotate("text", x = d0, y = n_calc, hjust = -0.1, vjust = -0.8, size = 3.2,
+           label = paste0("5% of baseline: n = ", n_calc)) +
+  labs(x = "Margin of error d (rand)", y = "Required sample size n") +
+  theme_minimal(base_size = 10)
+```
+
+**B7. Sensitivity to the assumed parameter.** Figure 3 repeats the calculation for assumed means of 25%, 50%, 75% and 100% of the baseline, with the margin of error expressed as a share of the assumed mean (so that "5%" means the same thing on every curve).
+
+**B8. Held fixed.**  $N$, the strata and weights $W_h$, the 95% level, the prior $S_h$ (the variability is a property of the portfolio) and the Neyman allocation rule. Varied: only the assumed mean, and therefore $d=e\times$ assumed mean.
+
+```{r fig2, fig.cap="Required sample size against relative margin of error for four assumed parameter values ($S_h$ fixed). Dots mark the 5\\% requirement."}
+ggplot(c2, aes(e, n, colour = Assumed)) + geom_line(linewidth = 0.9) +
+  geom_point(data = pts, size = 2.5) +
+  geom_vline(xintercept = 0.05, linetype = 2, colour = "grey40") +
+  scale_x_continuous(labels = function(x) paste0(100 * x, "%")) +
+  scale_colour_brewer(palette = "Set1") +
+  labs(x = "Margin of error as % of assumed mean", y = "Required sample size n",
+       colour = "Assumed mean") +
+  theme_minimal(base_size = 10) + theme(legend.position = "right")
+```
+
+```{r senstab}
+cv_n <- sapply(ks, function(k) n_neyman(0.05 * k * Ybar0, S_prior * k))
+d <- data.frame(Assumed = lab, mean = fmt(ks * Ybar0), d = fmt(0.05 * ks * Ybar0),
+                n = fmt(ceiling(pts$n)), nn = fmt(ceiling(pts$n / (1 - r_nr))),
+                cvn = fmt(ceiling(cv_n)))
+tab(d, "Required sample size at a 5\\% half-width under each assumed mean.",
+    col.names = c("Assumed mean", "Mean (R)", "$d$ (R)", "$n$ ($S_h$ fixed)",
+                  "$n/(1-r)$", "$n$ (constant CV)"), align = "lrrrrr")
+```
+
+**B9. Proportions.** Not applicable
+
+**B10. Discussion.**
+
+*Figure 2 (baseline).* The curve falls steeply and then flattens which shows tightening the margin of error from a loose value to a tight one needs many more claims, and each extra claim buys less precision than the last. At the 5% target (a margin of R`r fmt(d0)`), the Neyman design needs `r n_calc` claims.
+
+*Figure 3 (assumed mean).* With $S_h$ fixed, a lower assumed mean makes the 5% target a smaller margin in rand against the same variability, so more claims are needed. The required $n$ rises from `r ceiling(pts$n[4])` at the baseline to `r ceiling(pts$n[1])` at 25% of it. The curves flatten as $n$ approaches $N$ because of the finite population correction. If variability fell in proportion to the mean (a constant coefficient of variation), the answer would not change at all, because a relative precision target depends only on the CV.
+
+*Overall findings.* The sample size is driven by two things: how variable the claims are (mainly the heavy theft tail) and how good the planning guess of the mean is. Over-guessing the mean is  costly , since it leaves us with too few claims for the true target. The stratified design needs about `r fmt(100 * (1 - n_calc / n_srs0))`% fewer claims than SRSWOR (`r n_calc` against `r n_srs0`), because the strata remove most of the variation between causes of loss.
+
+# Section C: Sample Construction
+
+**C1. Final sample size.** The calculated $n=$ `r n_calc` is divided by $1-r=0.9$ to give **`r n_final`** claims, which still delivers at least `r n_calc` usable files if 10% are lost. Rounding up and the 30-claim minimum are accounted for in the allocation table of Section B.
+
+**C2. Population.** The full population of 10,000 claims was generated in A5 (seed 4102).
+
+**C3–C5. One probability sample.** Within each stratum an SRSWOR of $n_h$ claims is drawn (seed 2026). Every claim in stratum $h$ has inclusion probability $\pi_h=n_h/N_h>0$ and weight $1/\pi_h=N_h/n_h$, so every eligible unit has a known, positive probability of selection.
+
+```{r draw}
+set.seed(2026)
+idx <- unlist(lapply(seq_along(strata), function(h)
+  sample(which(pop$stratum == strata[h]), n_h[h])))
+samp <- pop[idx, ]
+h_id <- as.integer(samp$stratum)
+samp$stratum_id <- h_id
+samp$N_h        <- N_h[h_id]
+samp$n_h        <- n_h[h_id]
+samp$pi         <- samp$n_h / samp$N_h
+samp$weight     <- 1 / samp$pi
+samp <- samp[, c("claim_id", "stratum", "stratum_id", "N_h", "n_h", "pi", "weight",
+                 "claim_amount", "claimant_age", "vehicle_age", "vehicle_value", "area")]
+rownames(samp) <- NULL
+
+# checks
+stopifnot(nrow(samp) == n_final, all(samp$pi > 0), !anyDuplicated(samp$claim_id))
+sum_w <- sum(samp$weight)
+```
+
+**C6. Saved files.** The sum of the weights is `r fmt(sum_w)`, which equals $N$ as it should (each sampled claim represents $1/\pi_h$ claims). The first rows of the sample are shown below.
+
+```{r save}
+write.csv(pop,  "population.csv", row.names = FALSE)
+write.csv(samp, "sample.csv",     row.names = FALSE)
+h <- head(samp[, c("claim_id", "stratum", "pi", "weight", "claim_amount", "claimant_age", "area")], 5)
+h$pi <- fmt(h$pi, 3); h$weight <- fmt(h$weight, 2); h$claim_amount <- fmt(h$claim_amount, 2)
+tab(h, "First five rows of sample.csv (selected columns).",
+    col.names = c("Claim ID", "Stratum", "$\\pi$", "Weight", "Claim (R)", "Age", "Area"))
+```
+
+# Section D: Design-Based Estimation
+
+**D1. Design object.** The design is stratified single-stage SRSWOR: no clusters (`ids = ~1`), strata by cause, weights $N_h/n_h$, and the stratum population size as the finite population correction.
+
+```{r survey, echo=TRUE}
+des <- svydesign(ids = ~1, strata = ~stratum, weights = ~weight,
+                 fpc = ~N_h, data = samp)
+est <- svymean(~claim_amount, des, deff = TRUE)
+ci  <- confint(est)
+```
+
+```{r esttab}
+hw <- (ci[2] - ci[1]) / 2
+res <- data.frame(
+  Quantity = c("Point estimate (R)", "Estimated variance", "Standard error (R)",
+               "95% CI lower (R)", "95% CI upper (R)", "CV (%)",
+               "Design effect (vs SRSWOR)", "CI half-width (R)", "Half-width as % of baseline"),
+  Value = c(fmt(coef(est), 2), fmt(as.numeric(vcov(est)), 0), fmt(SE(est), 2),
+            fmt(ci[1], 2), fmt(ci[2], 2), fmt(100 * cv(est), 2),
+            fmt(deff(est), 3), fmt(hw, 2), fmt(100 * hw / Ybar0, 2)))
+tab(res, "Stratified Neyman estimate of the mean claim.", align = "lr")
+```
+
+**D2–D3. Estimate.** The estimator is $\bar y_{st}=\sum_hW_h\bar y_h$ with $\hat V(\bar y_{st})=\sum_hW_h^2(1-f_h)s_h^2/n_h$ (table above).
+
+**D4. Inclusion probabilities and weights.** $\pi_h=n_h/N_h$ is the chance a claim in stratum $h$ is selected, and $w_h=1/\pi_h$ is the number of population claims that one sampled claim represents. The inclusion probabilities are `r fmt(n_h[1] / N_h[1], 3)` for potholes, `r fmt(n_h[2] / N_h[2], 3)` for weather/hail, `r fmt(n_h[3] / N_h[3], 3)` for accidents and `r fmt(n_h[4] / N_h[4], 3)` for theft. The corresponding weights are `r fmt(wt_h[1], 1)`, `r fmt(wt_h[2], 1)`, `r fmt(wt_h[3], 1)` and `r fmt(wt_h[4], 2)`. So each sampled pothole claim stands for about `r fmt(wt_h[1])` claims in the population, while each sampled theft claim stands for only about `r fmt(wt_h[4], 1)`. The more heavily a stratum is sampled, the smaller its weight.
+```{r stratest}
+sb <- svyby(~claim_amount, ~stratum, des, svymean)
+tm <- tapply(pop$claim_amount, pop$stratum, mean)
+d <- data.frame(Stratum = strata, nh = fmt(n_h), est = fmt(sb$claim_amount, 0),
+                se = fmt(sb$se, 0), tru = fmt(tm, 0), err = fmt(sb$claim_amount - tm, 0))
+tab(d, "Stratum-level design-based estimates (rand).",
+    col.names = c("Stratum", "$n_h$", "Estimate", "SE", "True mean", "Error"), align = "lrrrrr")
+```
+
+```{r compare}
+naive <- mean(samp$claim_amount)
+set.seed(7)
+srs <- pop[sample(N, n_final), ]
+srs$Ntot <- N
+des_s <- svydesign(ids = ~1, fpc = ~Ntot, data = srs)
+est_s <- svymean(~claim_amount, des_s, deff = TRUE)
+ci_s  <- confint(est_s)
+
+cmp <- data.frame(
+  Estimator = c("Naive unweighted mean (stratified sample)", "Design-adjusted, stratified Neyman",
+                "SRSWOR benchmark", "True finite-population mean"),
+  Estimate = c(fmt(naive, 2), fmt(coef(est), 2), fmt(coef(est_s), 2), fmt(Ybar, 2)),
+  Error = c(fmt(naive - Ybar, 2), fmt(coef(est) - Ybar, 2), fmt(coef(est_s) - Ybar, 2), "0.00"))
+tab(cmp, "Naive, design-adjusted and true values (rand).", align = "lrr")
+```
+
+**D5. Naive versus design-adjusted.** The naive mean is badly biased upward (error R`r fmt(naive - Ybar, 0)`) because Neyman deliberately oversamples theft and accident claims, which are large. Weighting by $1/\pi_h$ restores the correct stratum shares and brings the estimate to within R`r fmt(abs(coef(est) - Ybar), 0)` of the truth.
+
+**D6. SRSWOR benchmark.** An SRSWOR of the same size (`r n_final`) was drawn and analysed with `svydesign(ids = ~1, fpc = ~Ntot)`.
+
+```{r bench}
+b <- data.frame(
+  Design = c("Stratified Neyman", "SRSWOR"),
+  Est = fmt(c(coef(est), coef(est_s)), 2),
+  SE = fmt(c(SE(est), SE(est_s)), 2),
+  Lo = fmt(c(ci[1], ci_s[1]), 2), Hi = fmt(c(ci[2], ci_s[2]), 2),
+  CV = fmt(100 * c(cv(est), cv(est_s)), 2),
+  W = fmt(c(ci[2] - ci[1], ci_s[2] - ci_s[1]), 0))
+tab(b, "One-sample comparison of the two designs.",
+    col.names = c("Design", "Estimate (R)", "SE (R)", "CI lower", "CI upper", "CV (\\%)", "CI width (R)"),
+    align = "lrrrrrr")
+```
+
+In this draw the stratified SE is `r fmt(SE(est), 0)` against `r fmt(SE(est_s), 0)` for SRSWOR, a variance ratio of `r fmt((SE(est) / SE(est_s))^2, 3)`.
+
+**D7. Empirical versus estimated SE.** This comparison needs repeated samples and is reported in the Monte Carlo results table of Section E.
+
+**D8. Precision bound.** The 95% half-width of the stratified estimate is R`r fmt(hw, 0)`, which is `r fmt(100 * hw / Ybar0, 2)`% of the baseline, `r ifelse(hw <= d0, "within", "outside")` the 5% bound of R`r fmt(d0, 0)`. The sample was drawn at the inflated size, so the bound holds even if 10% of files are lost. The design achieved this with fewer observations than SRSWOR would need, because Neyman allocation concentrates effort in the high-variance theft and accident strata.
+
+# Section E: Monte Carlo Simulation
+
+**E1–E2. Procedure.** The complete procedure (stratified Neyman sampling with the fixed allocation from Section B, and SRSWOR of the same total size) is repeated $R=1{,}000$ times (seed 2027). For each repetition the estimate, standard error and 95% limits are stored. For speed the estimators are coded directly (they are the same formulas that `survey` uses in Section D).
+
+```{r sim}
+R <- 1000
+set.seed(2027)
+pop_list <- split(pop$claim_amount, pop$stratum)
+
+one_str <- function() {
+  ys <- Map(function(y, n) sample(y, n), pop_list, n_h)
+  m  <- sapply(ys, mean); s2 <- sapply(ys, var)
+  c(sum(W_h * m), sqrt(sum(W_h^2 * (1 - n_h / N_h) * s2 / n_h)))
+}
+one_srs <- function() {
+  y <- sample(pop$claim_amount, n_final)
+  c(mean(y), sqrt((1 - n_final / N) * var(y) / n_final))
+}
+sim_str <- t(replicate(R, one_str()))
+sim_srs <- t(replicate(R, one_srs()))
+
+metrics <- function(m, truth) {
+  est <- m[, 1]; se <- m[, 2]
+  lo <- est - z * se; hi <- est + z * se
+  cov <- mean(lo <= truth & truth <= hi)
+  c(Bias = mean(est) - truth, RelBias = 100 * (mean(est) - truth) / truth,
+    EmpSE = sd(est), AvgSE = mean(se), RMSE = sqrt(mean((est - truth)^2)),
+    Coverage = 100 * cov, MCSE = 100 * sqrt(cov * (1 - cov) / R),
+    Width = mean(hi - lo), Within5 = 100 * mean((hi - lo) / 2 <= d0))
+}
+M <- rbind(Stratified = metrics(sim_str, Ybar), SRSWOR = metrics(sim_srs, Ybar))
+deff_emp <- var(sim_str[, 1]) / var(sim_srs[, 1])
+deff_est <- mean(sim_str[, 2]^2) / mean(sim_srs[, 2]^2)
+```
+
+**E3–E4. Performance measures.** The table below reports the following for each design, with the table heading in brackets. *Bias* is the average of the 1,000 estimates minus the true mean, and *relative bias* (Rel. bias) expresses this as a percentage of the true mean. The *empirical standard error* (Emp. SE) is the standard deviation of the 1,000 estimates, which is the true sampling variability of the estimator, and the *average estimated standard error* (Avg est. SE) is the average of the standard errors calculated from each individual sample. The *root mean squared error* (RMSE) is the typical size of the estimation error, combining bias and variability. *Coverage* (Cover.) is the percentage of the 1,000 95% confidence intervals that contain the true mean, and the *Monte Carlo standard error of the coverage* (MCSE cov.), $\sqrt{\hat p(1-\hat p)/R}$, shows how much that percentage could change by chance, where $\hat p$ is the observed coverage and $R=1{,}000$ is the number of repetitions. The *confidence interval width* (CI width) is the average distance from the lower to the upper limit, and the last column (Half-width $\le$ 5%) is the percentage of intervals whose half-width was within the 5% precision bound.
+
+```{r simtab}
+d <- data.frame(Design = rownames(M),
+                Bias = fmt(M[, "Bias"], 1), Rel = fmt(M[, "RelBias"], 3),
+                Emp = fmt(M[, "EmpSE"], 0), Avg = fmt(M[, "AvgSE"], 0),
+                RMSE = fmt(M[, "RMSE"], 0), Cov = fmt(M[, "Coverage"], 1),
+                MC = fmt(M[, "MCSE"], 2), W = fmt(M[, "Width"], 0),
+                P5 = fmt(M[, "Within5"], 1))
+tab(d, "Monte Carlo results over 1,000 repetitions (rand unless stated).",
+    col.names = c("Design", "Bias", "Rel. bias (\\%)", "Emp. SE", "Avg est. SE", "RMSE",
+                  "Cover. (\\%)", "MCSE cov.", "CI width", "Half-width $\\le5\\%$ (\\%)"),
+    align = "lrrrrrrrrr")
+```
+
+```{r fig3, fig.cap="Sampling distributions of the two estimators over 1,000 repetitions. Dashed line: true mean."}
+dd <- data.frame(est = c(sim_str[, 1], sim_srs[, 1]),
+                 Design = rep(c("Stratified Neyman", "SRSWOR"), each = R))
+ggplot(dd, aes(est, fill = Design)) + geom_density(alpha = 0.5, colour = NA) +
+  geom_vline(xintercept = Ybar, linetype = 2) +
+  scale_fill_manual(values = c("#d95f02", "#1f4e79")) +
+  scale_x_continuous(labels = function(x) fmt(x)) +
+  labs(x = "Estimate of mean claim (rand)", y = "Density") +
+  theme_minimal(base_size = 10)
+```
+
+**E5. Comparison.**
+
+- *Bias:* both estimators are unbiased in theory. The simulated relative biases (`r fmt(M[1, "RelBias"], 3)`% and `r fmt(M[2, "RelBias"], 3)`%) are within Monte Carlo noise.
+- *Variance and RMSE:* the empirical SE falls from R`r fmt(M[2, "EmpSE"], 0)` (SRSWOR) to R`r fmt(M[1, "EmpSE"], 0)` (stratified), and RMSE from R`r fmt(M[2, "RMSE"], 0)` to R`r fmt(M[1, "RMSE"], 0)`.
+- *Design effect:* the empirical variance ratio is `r fmt(deff_emp, 3)` (estimated ratio `r fmt(deff_est, 3)`), i.e. stratification cuts the variance by about `r fmt(100 * (1 - deff_emp))`%.
+- *Interval width and coverage:* mean CI width is R`r fmt(M[1, "Width"], 0)` against R`r fmt(M[2, "Width"], 0)`. Coverage is `r fmt(M[1, "Coverage"], 1)`% for the stratified design and `r fmt(M[2, "Coverage"], 1)`% for SRSWOR (Monte Carlo SE about `r fmt(M[1, "MCSE"], 2)` points), against a nominal 95%. Any shortfall from 95% is small relative to the Monte Carlo error; heavy lognormal tails are the usual reason normal-based intervals can fall slightly short.
+- *SE check (D7):* the average estimated SE (R`r fmt(M[1, "AvgSE"], 0)`) is close to the empirical SE (R`r fmt(M[1, "EmpSE"], 0)`) for the stratified design, so the design-based variance estimator is working; the SRSWOR pair is R`r fmt(M[2, "AvgSE"], 0)` and R`r fmt(M[2, "EmpSE"], 0)`.
+- *Precision bound:* `r fmt(M[1, "Within5"], 1)`% of stratified intervals and `r fmt(M[2, "Within5"], 1)`% of SRSWOR intervals had half-width within 5% of the baseline.
+
+# Conclusion
+
+Stratifying motor claims by cause of loss and allocating by Neyman's rule gives an unbiased estimate of the mean claim with a materially smaller variance than SRSWOR at the same sample size, and meets the 5% precision target with `r n_final` files. The key limitations are that Neyman allocation relies on accurate prior $S_h$ and equal cost per file, that claims may be misclassified, and that heavy tails can leave coverage slightly below nominal.
+
+
+# References
+
+
+
+King Price (2026) *The 7 most common car claims and how to avoid them*. King Price Insurance Blog, 24 February. Available at: https://blog.kingprice.co.za/7-most-common-car-insurance-claims-in-south-africa-and-how-to-avoid-them/ .
+
+
+Nasejje, Justine (2026) *Applied / Advanced Sampling: Lecture notes, Chapter 4: Stratified Random Sampling*. School of Statistics and Actuarial Science, University of the Witwatersrand.
+
+The full code, both CSV files and the knitted report are available at: <https://github.com/mischaynaicker-dotcom/Applied-Sampling-motor-claims-sampling-Mischay-Naicker-2690157>
+
+
+**Declaration on generative AI use.** Generative AI (Claude, by Anthropic) was used to help structure the report, draft the R code, write the LaTeX text and typeset the equations, and set up the GitHub repository and README. I verified the work myself: all code was run, the formulas and equations were checked against the course notes (including $V_{opt}$, the allocation rules and the sample-size derivation), and all numbers quoted in the text are generated by the code. The choice of strata, the lognormal parameters and the interpretation of the results were my own decisions.
