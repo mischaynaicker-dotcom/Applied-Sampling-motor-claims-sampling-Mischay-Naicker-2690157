@@ -1,7 +1,7 @@
 # Estimating the Mean Motor Insurance Claim: Stratified Sampling with Neyman Allocation
 
 **Mischay Naicker (2690157)**
-STAT4102 Applied / Advanced Sampling, Mini Project, Semester Two 2026
+STAT4102A Applied  Sampling, Mini Project, Semester Two 2026
 University of the Witwatersrand, School of Statistics and Actuarial Science
 
 ## Overview
